@@ -8,6 +8,7 @@
 #include <functional>
 #include <ext/hash_map>
 #include <boost/iostreams/filter/bzip2.hpp>
+#include <boost/iostreams/filter/gzip.hpp>
 #include <boost/iostreams/device/file.hpp>
 #include <boost/iostreams/filtering_stream.hpp>
 #include <omp.h>
@@ -17,19 +18,33 @@
 #define BUF_SIZE 1024
 namespace BI = boost::iostreams;
 
-
 struct ngram_info {
   const char *path_template;
   int n_files;
 };
 
-ngram_info ngram_paths[]={
+#define LANGUAGE_DE 0
+#define LANGUAGE_EN 1
+
+ngram_info ngram_paths_de[]={
   {"/export/local/yannick/ngrams/GERMAN/1gms/vocab.bz2",1},
   {"/export/local/yannick/ngrams/GERMAN/2gms/2gm-%04d.bz2",9},
   {"/export/local/yannick/ngrams/GERMAN/3gms/3gm-%04d.bz2",16},
   {"/export/local/yannick/ngrams/GERMAN/4gms/4gm-%04d.bz2",15},
   {"/export/local/yannick/ngrams/GERMAN/5gms/5gm-%04d.bz2",11},
 };
+
+ngram_info ngram_paths_en[]={
+  {"/export/local/yannick/ngrams/EN/1gms/vocab.gz",1},
+  {"/export/local/yannick/ngrams/EN/2gms/2gm-%04d.gz",31},
+  {"/export/local/yannick/ngrams/EN/3gms/3gm-%04d.gz",97},
+  {"/export/local/yannick/ngrams/EN/4gms/4gm-%04d.gz",131},
+  {"/export/local/yannick/ngrams/EN/5gms/5gm-%04d.gz",117},
+};
+
+ngram_info *ngram_paths_all[]={
+  ngram_paths_de,
+  ngram_paths_en};
 
 class IWordFilter
 {
@@ -116,30 +131,43 @@ public:
 class FilterEngine {
 protected:
   std::vector<IWordFilter *> filters;
+  int language;
   int want_output;
 public:
   int pattern_len() {
     return filters.size();
   }
+
+  int get_language() {
+    return language;
+  }
+  
   FilterEngine(int argc, char **argv)
   {
+    int opt_count=0;
     want_output=0;
+    language=0;
     for (int i=0; i<argc; i++) {
       char *arg=argv[i];
-      if (arg[0]=='@') {
-	std::string prefix(arg+1);
-	filters.push_back(new HashWordFilter(prefix));
-	want_output |= (1<<i);
+      if (arg[0]=='-') {
+        if (strcmp(arg+1,"EN")==0) {
+          language=LANGUAGE_EN;
+        };
+        opt_count+=1;
+      } else if (arg[0]=='@') {
+        std::string prefix(arg+1);
+        filters.push_back(new HashWordFilter(prefix));
+        want_output |= (1<<(i-opt_count));
       } else if (arg[0]=='*') {
-	filters.push_back(new NullWordFilter());
+        filters.push_back(new NullWordFilter());
       } else if (arg[0]=='?') {
-	filters.push_back(new NullWordFilter());
-	want_output |= (1<<i);
+        filters.push_back(new NullWordFilter());
+        want_output |= (1<<(i-opt_count));
       } else if (arg[0]=='%') {
-	filters.push_back(new RegexWordFilter(arg+1));
+        filters.push_back(new RegexWordFilter(arg+1));
       } else {
-	filters.push_back(new RegexWordFilter(arg));
-	want_output |= (1<<i);
+        filters.push_back(new RegexWordFilter(arg));
+        want_output |= (1<<(i-opt_count));
       }
     }
   }
@@ -151,8 +179,13 @@ public:
     const char *toks[16];
     std::ifstream myfile(filename, std::ios::binary|std::ios::in);
     BI::filtering_stream<BI::input> my_filter;
-    my_filter.push(BI::bzip2_decompressor());
+    if (strstr(filename,".bz2")!=NULL) {
+      my_filter.push(BI::bzip2_decompressor());
+    } else if (strstr(filename,".gz")!=NULL) {
+      my_filter.push(BI::gzip_decompressor());
+    }
     my_filter.push(myfile);
+    
     fprintf(stderr, "Open %s\n",filename);
     while(!my_filter.eof()) {
       char *w0;
@@ -210,7 +243,7 @@ public:
 int main(int argc, char **argv)
 {
   FilterEngine engine(argc-1,argv+1);
-  ngram_info &info=ngram_paths[engine.pattern_len()-1];
+  ngram_info &info=ngram_paths_all[engine.get_language()][engine.pattern_len()-1];
   omp_set_num_threads(3);
 #pragma omp parallel for
   for (int i=0; i<info.n_files; i++) {
